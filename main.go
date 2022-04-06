@@ -50,6 +50,7 @@ var (
 
 	emailRegex = regexp.MustCompile(`\"(?P<name>.*<(?P<email>.*)>)\"`)
 	keyIDRegex = regexp.MustCompile(`ID (?P<keyId>.*),`) // keyID should be of exactly 8 or 16 characters
+	sshKeyRegex = regexp.MustCompile(`(?s)ssh key\s*(?P<hash>[^\s]*)`)
 
 	errEmptyResults    = errors.New("no matching entry was found")
 	errMultipleMatches = errors.New("multiple entries matched the query")
@@ -242,23 +243,36 @@ func (c KeychainClient) Msg(pinentry.Settings) *common.Error {
 // GetPIN executes the main logic for returning a password/pin back to the gpg-agent
 func GetPIN(authFn AuthFunc, promptFn PromptFunc, logger *log.Logger) GetPinFunc {
 	return func(s pinentry.Settings) (string, *common.Error) {
+		var keychainLabel string
 		matches := emailRegex.FindStringSubmatch(s.Desc)
-		name := strings.Split(matches[1], " <")[0]
-		email := matches[2]
 
-		matches = keyIDRegex.FindStringSubmatch(s.Desc)
-		keyID := matches[1]
+		if matches == nil {
+			matches := sshKeyRegex.FindStringSubmatch(s.Desc)
+			if matches == nil {
+				return "", assuanError(fmt.Errorf("Unrecognized key: %s", s.Desc))
+			}
+			// Craft a keychainLabel for SSL authentication.
+			keychainLabel = fmt.Sprintf("SSH (%s)", matches[1])
+		} else {
+			// Craft a keychainLabel for other requests.
+			name := strings.Split(matches[1], " <")[0]
+			email := matches[2]
 
-		// Drop the optional 0x prefix from keyID (--keyid-format)
-		// https://www.gnupg.org/documentation/manuals/gnupg/GPG-Configuration-Options.html
-		keyID = strings.TrimPrefix(keyID, "0x")
+			matches = keyIDRegex.FindStringSubmatch(s.Desc)
+			keyID := matches[1]
 
-		if len(keyID) != 8 && len(keyID) != 16 {
-			logger.Printf("Invalid keyID: %s", keyID)
-			return "", assuanError(fmt.Errorf("invalid keyID: %s", keyID))
+			// Drop the optional 0x prefix from keyID (--keyid-format)
+			// https://www.gnupg.org/documentation/manuals/gnupg/GPG-Configuration-Options.html
+			keyID = strings.TrimPrefix(keyID, "0x")
+
+			if len(keyID) != 8 && len(keyID) != 16 {
+				logger.Printf("Invalid keyID: %s", keyID)
+				return "", assuanError(fmt.Errorf("invalid keyID: %s", keyID))
+			}
+
+			keychainLabel = fmt.Sprintf("%s <%s> (%s)", name, email, keyID)
 		}
 
-		keychainLabel := fmt.Sprintf("%s <%s> (%s)", name, email, keyID)
 		exists, err := checkEntryInKeychain(keychainLabel)
 		if err != nil {
 			logger.Printf("error checking entry in keychain: %s", err)
